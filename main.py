@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import io
 import time
 import uuid
@@ -42,8 +40,8 @@ logger = logging.getLogger("credit_ai")
 
 app = FastAPI(title="Credit AI MVP Backend")
 
-APP_BUILD = "analyze_memo_v6_2026-01-27_SIMPLIFIED"
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+APP_BUILD = "analyze_memo_v7_2026-03-22_HTML_FIX"
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024  # increased to 30MB for large HTM filings
 QUALITY_MIN_COMPLETENESS = 0.55
 
 store = RunStore()
@@ -62,7 +60,7 @@ async def add_request_id_and_timing(request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for local development
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,9 +84,9 @@ def debug_routes():
     return {"build": APP_BUILD, "routes": out}
 
 
-# =========================
-# File parsing utilities
-# =========================
+# ============================================================
+# FILE PARSING UTILITIES
+# ============================================================
 
 def _pdf_to_text_basic(file_bytes: bytes) -> str:
     reader = PdfReader(io.BytesIO(file_bytes))
@@ -133,15 +131,34 @@ def _pdf_to_text_with_tables_if_available(file_bytes: bytes) -> str:
 
 
 def _html_to_text_preserve_tables(file_bytes: bytes) -> str:
-    html = file_bytes.decode("utf-8", errors="ignore")
-    soup = BeautifulSoup(html, "html.parser")
+    """
+    Convert HTML/XBRL filing to plain text + pipe-delimited tables.
 
-    for tag in soup(["script", "style", "noscript"]):
+    KEY FIX: SEC inline XBRL filings (iXBRL) often have the ENTIRE document
+    as 7 lines of HTML because every element is on one giant line.
+    BeautifulSoup handles this fine but the resulting text needs
+    deduplication — table-of-contents entries appear as plain text AND
+    as table rows, causing anchors like "Item 8. Financial Statements"
+    to be found at page 1 (TOC) instead of page 89 (actual section).
+
+    We solve this by:
+    1. Extracting body text normally
+    2. Appending tables separately tagged as TABLES:
+    3. agents.py _select_relevant_statement_text then skips the TOC
+       by finding the LAST occurrence of key anchors, not the first.
+    """
+    raw_html = file_bytes.decode("utf-8", errors="ignore")
+    soup = BeautifulSoup(raw_html, "html.parser")
+
+    # Remove non-content tags
+    for tag in soup(["script", "style", "noscript", "head"]):
         tag.decompose()
 
+    # Get body text
     body_text = soup.get_text(separator="\n")
     body_text = "\n".join(line.strip() for line in body_text.splitlines() if line.strip())
 
+    # Extract tables separately
     table_lines = []
     for table in soup.find_all("table"):
         for tr in table.find_all("tr"):
@@ -155,7 +172,14 @@ def _html_to_text_preserve_tables(file_bytes: bytes) -> str:
                 table_lines.append(" | ".join(cells))
         table_lines.append("")
 
-    combined = body_text + "\n\nTABLES:\n" + "\n".join(table_lines)
+    combined = body_text
+    if table_lines:
+        combined += "\n\nTABLES:\n" + "\n".join(table_lines)
+
+    logger.info(
+        "HTML→text: body=%d chars, table_lines=%d, total=%d chars",
+        len(body_text), len(table_lines), len(combined)
+    )
     return combined
 
 
@@ -170,6 +194,7 @@ def file_to_text(file_bytes: bytes, filename: str) -> str:
         or b"<html" in head_lower
         or b"<head" in head_lower
         or b"<table" in head_lower
+        or b"<?xml" in head_lower          # catches iXBRL files that start with <?xml
     )
 
     if is_pdf:
@@ -241,29 +266,33 @@ def _generate_memo(
     min_fcc: Optional[float],
     mda_summary: Optional[str] = "",
 ) -> str:
-    """Generate memo - uses full underwriting memo if borrower data provided"""
+    """Generate memo — uses full underwriting memo if borrower data provided."""
     has_borrower_data = bool(borrower_name or industry or facility_type or use_of_proceeds)
-    
+
     if has_borrower_data:
         borrower = BorrowerProfile(
             name=borrower_name or "[Company Name - To Be Determined]",
             industry=industry or "[Industry - To Be Determined]",
             facility_type=facility_type or "[Facility Type - To Be Determined]",
-            use_of_proceeds=use_of_proceeds or "[Use of Proceeds - To Be Determined]"
+            use_of_proceeds=use_of_proceeds or "[Use of Proceeds - To Be Determined]",
         )
-        
+
         covenants = CovenantSet(
             max_total_leverage=max_total_leverage,
             min_fcc=min_fcc,
-            min_dscr=None
+            min_dscr=None,
         )
-        
+
         logger.info("Generating full underwriting memo with borrower context and MD&A insights")
         return generate_underwriting_memo(borrower, covenants, extracted, mda_summary or "")
     else:
         logger.info("Generating baseline financial summary (no borrower context)")
         return generate_financial_summary_memo(extracted)
 
+
+# ============================================================
+# ANALYZE ENDPOINT
+# ============================================================
 
 @app.post("/v1/analyze")
 async def analyze_single(
@@ -280,22 +309,22 @@ async def analyze_single(
     min_fcc: Optional[float] = Form(None),
 ):
     """
-    Upload file -> extract -> compute -> memo.
-    Always returns: memo_markdown + extracted (full JSON financial data)
+    Upload file -> strip HTML -> extract financials -> compute metrics -> generate memo.
+    Always returns: memo_markdown + extracted (full JSON) + mda_summary.
     """
     run_id: Optional[str] = None
 
     try:
         file_bytes = await file.read()
         if len(file_bytes) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="File too large. Max 10MB.")
+            raise HTTPException(status_code=413, detail="File too large. Max 30MB.")
 
         run_id = str(uuid.uuid4())
         file_sha = store.create_run(run_id, file.filename, file_bytes)
 
         cached = None if cache_bypass else store.find_completed_by_file_sha(file_sha)
 
-        # ---- Cache path ----
+        # ── Cache path ───────────────────────────────────────────────────
         if cached and cached.extracted_json:
             extracted = ExtractionResult.model_validate(cached.extracted_json)
             extracted = validate_and_compute(extracted)
@@ -303,7 +332,8 @@ async def analyze_single(
             if _cache_is_usable(extracted):
                 memo_markdown = _generate_memo(
                     extracted, borrower_name, industry, facility_type,
-                    use_of_proceeds, max_total_leverage, min_fcc, ""  # No MD&A for cached results
+                    use_of_proceeds, max_total_leverage, min_fcc,
+                    "",  # No MD&A for cached results — re-run with cache_bypass=true to get MD&A
                 )
 
                 extracted_json = extracted.model_dump(mode="json", exclude_none=False)
@@ -333,6 +363,7 @@ async def analyze_single(
                     "validation_flags": flags,
                     "memo_markdown": memo_markdown,
                     "extracted": extracted_json,
+                    "mda_summary": "(cached run — resubmit with cache_bypass=true to get fresh MD&A)",
                     "cache_bypass": bool(cache_bypass),
                 }
                 if include_previews:
@@ -343,10 +374,11 @@ async def analyze_single(
 
             logger.info("Cache unusable (periods=%d). Re-extracting run=%s", len(extracted.periods or []), run_id)
 
-        # ---- Fresh extraction path ----
+        # ── Fresh extraction path ────────────────────────────────────────
         store.set_running(run_id)
 
         text = file_to_text(file_bytes, file.filename)
+
         logger.info(
             "analyze(fresh) run=%s filename=%s text_len=%d tables_present=%s cache_bypass=%s",
             run_id,
@@ -367,12 +399,14 @@ async def analyze_single(
                 detail="No financial-amount patterns detected. OCR/table extraction likely required.",
             )
 
+        # agents.py handles HTML stripping internally as a second safety net,
+        # but file_to_text above already converts HTM to plain text + tables.
         extracted, excerpt, raw_model, mda_summary = extract_financials_from_text(text)
         extracted = validate_and_compute(extracted)
 
         memo_markdown = _generate_memo(
             extracted, borrower_name, industry, facility_type,
-            use_of_proceeds, max_total_leverage, min_fcc, mda_summary
+            use_of_proceeds, max_total_leverage, min_fcc, mda_summary,
         )
 
         extracted_json = extracted.model_dump(mode="json", exclude_none=False)
@@ -394,7 +428,7 @@ async def analyze_single(
             model_raw_preview=raw_preview,
             memo_markdown=memo_markdown,
             model_name="gpt-4o-mini",
-            prompt_version="extractor_v1",
+            prompt_version="extractor_v2",
         )
 
         resp = {
@@ -405,7 +439,8 @@ async def analyze_single(
             "validation_flags": flags,
             "memo_markdown": memo_markdown,
             "extracted": extracted_json,
-            "mda_summary": mda_summary if include_previews else None,  # Include MD&A summary for debugging
+            # mda_summary is now ALWAYS returned (not gated behind include_previews)
+            "mda_summary": mda_summary,
             "cache_bypass": bool(cache_bypass),
         }
         if include_previews:
@@ -437,6 +472,10 @@ async def analyze_single(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+# ============================================================
+# EXCEL EXPORT ENDPOINT
+# ============================================================
+
 @app.post("/v1/export/excel")
 async def export_to_excel(
     file: UploadFile = File(...),
@@ -447,68 +486,54 @@ async def export_to_excel(
     max_total_leverage: Optional[float] = Form(None),
     min_fcc: Optional[float] = Form(None),
 ):
-    """
-    Analyze financials and export to Excel file
-    """
+    """Analyze financials and export to Excel file."""
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     import tempfile
     import os
-    
-    # First, run the analysis
+
     file_bytes = await file.read()
     if len(file_bytes) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="File too large. Max 10MB.")
+        raise HTTPException(status_code=413, detail="File too large. Max 30MB.")
 
     run_id = str(uuid.uuid4())
     file_sha = store.create_run(run_id, file.filename, file_bytes)
-    
+
     store.set_running(run_id)
-    
+
     text = file_to_text(file_bytes, file.filename)
-    
+
     if not text.strip():
         store.set_failed(run_id, "No text extracted.")
         raise HTTPException(status_code=400, detail="No text extracted.")
-    
+
     extracted, excerpt, raw_model, mda_summary = extract_financials_from_text(text)
     extracted = validate_and_compute(extracted)
-    
+
     # Create Excel workbook
     wb = openpyxl.Workbook()
-    
-    # Remove default sheet
     wb.remove(wb.active)
-    
-    # Create sheets
+
     summary_sheet = wb.create_sheet("Summary")
     income_stmt_sheet = wb.create_sheet("Income Statement")
     balance_sheet_sheet = wb.create_sheet("Balance Sheet")
     cash_flow_sheet = wb.create_sheet("Cash Flow")
     metrics_sheet = wb.create_sheet("Key Metrics")
-    
-    # Styling
+
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF", size=11)
     subheader_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
     subheader_font = Font(bold=True, size=10)
-    border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
-    )
-    
+
     # Summary Sheet
     summary_sheet['A1'] = 'Credit Analysis Summary'
     summary_sheet['A1'].font = Font(bold=True, size=14)
-    
+
     row = 3
     summary_sheet[f'A{row}'] = 'Borrower Information'
     summary_sheet[f'A{row}'].font = subheader_font
     summary_sheet[f'A{row}'].fill = subheader_fill
     row += 1
-    
     summary_sheet[f'A{row}'] = 'Company Name:'
     summary_sheet[f'B{row}'] = borrower_name or "N/A"
     row += 1
@@ -518,28 +543,25 @@ async def export_to_excel(
     summary_sheet[f'A{row}'] = 'Facility Type:'
     summary_sheet[f'B{row}'] = facility_type or "N/A"
     row += 2
-    
+
     summary_sheet[f'A{row}'] = 'Analysis Quality'
     summary_sheet[f'A{row}'].font = subheader_font
     summary_sheet[f'A{row}'].fill = subheader_fill
     row += 1
-    
+
     completeness = compute_completeness(extracted.model_dump(mode="json", exclude_none=False))
     summary_sheet[f'A{row}'] = 'Completeness Score:'
     summary_sheet[f'B{row}'] = f"{completeness*100:.0f}%"
     row += 1
     summary_sheet[f'A{row}'] = 'Periods Analyzed:'
     summary_sheet[f'B{row}'] = len(extracted.periods)
-    
-    # Build period headers
+
     periods = extracted.periods
     period_names = [p.period_name for p in periods]
-    
+
     # Income Statement Sheet
     income_stmt_sheet['A1'] = 'Income Statement'
     income_stmt_sheet['A1'].font = Font(bold=True, size=14)
-    
-    # Headers
     income_stmt_sheet['A3'] = 'Line Item'
     income_stmt_sheet['A3'].font = header_font
     income_stmt_sheet['A3'].fill = header_fill
@@ -548,12 +570,11 @@ async def export_to_excel(
         cell.value = pname
         cell.font = header_font
         cell.fill = header_fill
-    
-    # Income statement line items
+
     is_items = [
         ('Revenue', 'revenue'),
         ('Cost of Sales', 'cost_of_sales'),
-        ('Gross Profit', None),  # Calculated
+        ('Gross Profit', None),
         ('SG&A Expense', 'sga_expense'),
         ('Operating Income', 'operating_income'),
         ('EBITDA', 'ebitda'),
@@ -562,7 +583,7 @@ async def export_to_excel(
         ('Income Tax Expense', 'income_tax_expense'),
         ('Net Income', 'net_income'),
     ]
-    
+
     row = 4
     for label, field in is_items:
         income_stmt_sheet[f'A{row}'] = label
@@ -571,21 +592,18 @@ async def export_to_excel(
             if field:
                 value = is_.get(field)
             else:
-                # Calculated field (gross profit)
                 rev = is_.get('revenue')
                 cogs = is_.get('cost_of_sales')
                 value = rev - cogs if (rev is not None and cogs is not None) else None
-            
             cell = income_stmt_sheet.cell(row=row, column=i+2)
             if value is not None:
                 cell.value = value
                 cell.number_format = '#,##0'
         row += 1
-    
-    # Balance Sheet Sheet
+
+    # Balance Sheet
     balance_sheet_sheet['A1'] = 'Balance Sheet'
     balance_sheet_sheet['A1'].font = Font(bold=True, size=14)
-    
     balance_sheet_sheet['A3'] = 'Line Item'
     balance_sheet_sheet['A3'].font = header_font
     balance_sheet_sheet['A3'].fill = header_fill
@@ -594,7 +612,7 @@ async def export_to_excel(
         cell.value = pname
         cell.font = header_font
         cell.fill = header_fill
-    
+
     bs_items = [
         ('Cash & Equivalents', 'cash'),
         ('Total Assets', 'total_assets'),
@@ -604,7 +622,7 @@ async def export_to_excel(
         ('Long-term Debt', 'long_term_debt'),
         ('Current Portion LT Debt', 'current_portion_long_term_debt'),
     ]
-    
+
     row = 4
     for label, field in bs_items:
         balance_sheet_sheet[f'A{row}'] = label
@@ -616,11 +634,10 @@ async def export_to_excel(
                 cell.value = value
                 cell.number_format = '#,##0'
         row += 1
-    
-    # Cash Flow Sheet
+
+    # Cash Flow
     cash_flow_sheet['A1'] = 'Cash Flow Statement'
     cash_flow_sheet['A1'].font = Font(bold=True, size=14)
-    
     cash_flow_sheet['A3'] = 'Line Item'
     cash_flow_sheet['A3'].font = header_font
     cash_flow_sheet['A3'].fill = header_fill
@@ -629,7 +646,7 @@ async def export_to_excel(
         cell.value = pname
         cell.font = header_font
         cell.fill = header_fill
-    
+
     cf_items = [
         ('Operating Cash Flow', 'cfo'),
         ('Investing Cash Flow', 'cfi'),
@@ -639,7 +656,7 @@ async def export_to_excel(
         ('Cash Taxes Paid', 'cash_paid_for_income_taxes'),
         ('Dividends Paid', 'dividends_distributions_paid'),
     ]
-    
+
     row = 4
     for label, field in cf_items:
         cash_flow_sheet[f'A{row}'] = label
@@ -651,11 +668,10 @@ async def export_to_excel(
                 cell.value = value
                 cell.number_format = '#,##0'
         row += 1
-    
-    # Key Metrics Sheet
+
+    # Key Metrics
     metrics_sheet['A1'] = 'Key Credit Metrics'
     metrics_sheet['A1'].font = Font(bold=True, size=14)
-    
     metrics_sheet['A3'] = 'Metric'
     metrics_sheet['A3'].font = header_font
     metrics_sheet['A3'].fill = header_fill
@@ -664,60 +680,50 @@ async def export_to_excel(
         cell.value = pname
         cell.font = header_font
         cell.fill = header_fill
-    
+
     metric_items = [
         ('EBITDA', 'ebitda_computed', '#,##0'),
         ('EBITDA Margin', 'ebitda_margin', '0.0%'),
-        ('Gross Margin', None, '0.0%'),  # Calculated
+        ('Gross Margin', None, '0.0%'),
         ('Free Cash Flow', 'free_cash_flow', '#,##0'),
         ('Leverage (Debt/EBITDA)', 'leverage_total_debt_to_ebitda', '0.00"x"'),
         ('FCC', 'fcc', '0.00"x"'),
         ('FCC Numerator', 'fcc_numerator', '#,##0'),
         ('FCC Denominator', 'fcc_denominator', '#,##0'),
     ]
-    
+
     row = 4
     for label, field, fmt in metric_items:
         metrics_sheet[f'A{row}'] = label
         for i, period in enumerate(periods):
             dm = period.derived_metrics or {}
             is_ = period.income_statement or {}
-            
             if field:
                 value = dm.get(field)
             else:
-                # Calculated gross margin
                 rev = is_.get('revenue')
                 cogs = is_.get('cost_of_sales')
-                if rev and cogs and rev > 0:
-                    value = (rev - cogs) / rev
-                else:
-                    value = None
-            
+                value = (rev - cogs) / rev if (rev and cogs and rev > 0) else None
             cell = metrics_sheet.cell(row=row, column=i+2)
             if value is not None:
                 cell.value = value
                 cell.number_format = fmt
         row += 1
-    
-    # Add covenant compliance if provided
+
     if max_total_leverage or min_fcc:
         row += 2
         metrics_sheet[f'A{row}'] = 'Covenant Compliance'
         metrics_sheet[f'A{row}'].font = subheader_font
         metrics_sheet[f'A{row}'].fill = subheader_fill
         row += 1
-        
         if max_total_leverage:
             metrics_sheet[f'A{row}'] = 'Max Leverage Covenant:'
             metrics_sheet[f'B{row}'] = f"{max_total_leverage}x"
             row += 1
-        
         if min_fcc:
             metrics_sheet[f'A{row}'] = 'Min FCC Covenant:'
             metrics_sheet[f'B{row}'] = f"{min_fcc}x"
-    
-    # Auto-size columns
+
     for sheet in [summary_sheet, income_stmt_sheet, balance_sheet_sheet, cash_flow_sheet, metrics_sheet]:
         for column in sheet.columns:
             max_length = 0
@@ -726,18 +732,15 @@ async def export_to_excel(
                 try:
                     if len(str(cell.value)) > max_length:
                         max_length = len(str(cell.value))
-                except:
+                except Exception:
                     pass
-            adjusted_width = min(max_length + 2, 50)
-            sheet.column_dimensions[column_letter].width = adjusted_width
-    
-    # Save to temp file
+            sheet.column_dimensions[column_letter].width = min(max_length + 2, 50)
+
     temp_dir = tempfile.gettempdir()
     filename = f"{borrower_name or 'company'}_{run_id[:8]}_financials.xlsx".replace(" ", "_")
     filepath = os.path.join(temp_dir, filename)
-    
     wb.save(filepath)
-    
+
     store.set_completed(
         run_id=run_id,
         extracted_json=extracted.model_dump(mode="json", exclude_none=False),
@@ -747,11 +750,11 @@ async def export_to_excel(
         model_raw_preview=raw_model[:50000],
         memo_markdown="Excel export",
         model_name="gpt-4o-mini",
-        prompt_version="extractor_v1",
+        prompt_version="extractor_v2",
     )
-    
+
     return FileResponse(
         path=filepath,
         filename=filename,
-        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     )
