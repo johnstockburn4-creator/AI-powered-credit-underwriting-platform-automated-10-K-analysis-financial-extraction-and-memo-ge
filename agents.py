@@ -29,6 +29,14 @@ from credit_scoring import (
 
 logger = logging.getLogger("credit_ai")
 
+# Company extraction profiles (lazy import to avoid circular deps)
+try:
+    import profiles as _profile_store
+    _PROFILES_AVAILABLE = True
+except ImportError:
+    _PROFILES_AVAILABLE = False
+    logger.warning("profiles.py not found — profile system disabled")
+
 _client = None
 _anthropic_client = None
 
@@ -989,6 +997,11 @@ def _numeric_excerpt(text: str, max_chars: int = 130000, context_lines: int = 2)
 # MAIN EXTRACTION ENTRY POINT
 # ============================================================
 
+class _extract_profile_context:
+    """Simple namespace — set company_name before calling extract_financials_from_text."""
+    company_name = None
+
+
 def extract_financials_from_text(raw_text: str) -> Tuple[ExtractionResult, str, str, str]:
     raw_text = _strip_html_to_text(raw_text)
     selected = _select_relevant_statement_text(raw_text, max_chars=260000)
@@ -996,9 +1009,17 @@ def extract_financials_from_text(raw_text: str) -> Tuple[ExtractionResult, str, 
     numeric_block = _numeric_excerpt(selected, max_chars=130000, context_lines=1)
     combined_excerpt = (tables_block + "\n\n" if tables_block else "") + "NUMERIC LINES + CONTEXT:\n" + numeric_block
 
+    # Inject company-specific extraction rules if available
+    rules_block = ""
+    company_name_for_rules = getattr(_extract_profile_context, 'company_name', None)
+    if company_name_for_rules and _PROFILES_AVAILABLE:
+        rules_block = _profile_store.build_rules_prompt_block(company_name_for_rules)
+        if rules_block:
+            logger.info(f"Injecting extraction rules for {company_name_for_rules}")
+
     user_prompt = f"""Extract financial statement line items for ALL periods shown.
 
-CRITICAL MULTI-PERIOD RULES:
+{rules_block}CRITICAL MULTI-PERIOD RULES:
 - Financial statements show multiple year columns separated by | pipes
   e.g. "Net sales | 11,123 | 13,696 | 14,812" means FY2024=11123, FY2023=13696, FY2022=14812
 - You MUST return ONE separate period object for EACH year column shown
@@ -1063,6 +1084,41 @@ STATEMENT TEXT:
     extracted = ExtractionResult.model_validate(_normalize_payload(_coerce_json(raw_model_text)))
     period_names = [p.period_name for p in extracted.periods] if extracted.periods else []
 
+    # Record extraction context for each field (what the extractor found and where)
+    # This powers the "Show me what it found" display in the Review & Correct UI
+    # Runs always (not gated on company_name) so context is available even without borrower name
+    if _PROFILES_AVAILABLE:
+        for p in (extracted.periods or []):
+            for section_name, section_keys in [
+                ("income_statement", ["revenue","cost_of_sales","sga_expense",
+                  "operating_income","net_income","interest_expense",
+                  "income_tax_expense","depreciation_amortization","rent_expense"]),
+                ("balance_sheet",    ["cash","total_debt","long_term_debt",
+                  "current_portion_long_term_debt","revolver_facility_size",
+                  "revolver_borrowings","revolver_availability"]),
+                ("cash_flow",        ["cfo","capex","cash_paid_for_interest",
+                  "cash_paid_for_income_taxes","dividends_distributions_paid"]),
+            ]:
+                section = getattr(p, section_name, None) or {}
+                for field_key in section_keys:
+                    val = section.get(field_key) if isinstance(section, dict) else None
+                    if val is not None:
+                        ctx = _profile_store.extract_field_context(
+                            raw_text=raw_text,
+                            field_name=field_key,
+                            extracted_value=val,
+                            context_lines=3,
+                        )
+                        if ctx:
+                            if not isinstance(p.notes, list):
+                                p.notes = []
+                            # Store context as a structured note
+                            ctx_note = f"CONTEXT:{field_key}:{ctx}"
+                            # Remove old context note for this field if exists
+                            p.notes = [n for n in p.notes
+                                      if not (isinstance(n, str) and n.startswith(f"CONTEXT:{field_key}:"))]
+                            p.notes.append(ctx_note)
+
     # Lease
     lease_data = extract_lease_data(raw_text, period_names) if period_names else {}
     for p in (extracted.periods or []):
@@ -1125,6 +1181,22 @@ STATEMENT TEXT:
     if not mda_text:
         logger.error("_extract_mda_section returned empty string.")
     mda_summary = _summarize_mda_for_drivers(mda_text, extracted)
+    # Profile system: apply overrides then flag remaining conflicts
+    company_name = getattr(_extract_profile_context, 'company_name', None)
+    if company_name and _PROFILES_AVAILABLE:
+        # Step 1: Apply saved corrections (override wrong extracted values)
+        override_flags = _profile_store.apply_profile_overrides(company_name, extracted)
+        if override_flags:
+            existing = list(extracted.validation_flags or [])
+            extracted.validation_flags = existing + override_flags
+            logger.info(f"Profile overrides applied: {len(override_flags)} for {company_name}")
+        # Step 2: Flag any remaining conflicts for review
+        conflict_flags = _profile_store.apply_profile_to_extracted(company_name, extracted)
+        if conflict_flags:
+            existing = list(extracted.validation_flags or [])
+            extracted.validation_flags = existing + conflict_flags
+            logger.info(f"Profile conflicts flagged: {len(conflict_flags)} for {company_name}")
+
     return extracted, combined_excerpt, raw_model_text, mda_summary
 
 
