@@ -365,6 +365,7 @@ async def analyze_single(
                     excerpt_preview=cached.excerpt_preview,
                     model_raw_preview=cached.model_raw_preview,
                     memo_markdown=memo_markdown,
+                    mda_summary=cached.mda_summary,
                     model_name=cached.model_name,
                     prompt_version=cached.prompt_version,
                 )
@@ -449,6 +450,7 @@ async def analyze_single(
             excerpt_preview=excerpt_preview,
             model_raw_preview=raw_preview,
             memo_markdown=memo_markdown,
+            mda_summary=mda_summary,
             model_name="gpt-4o",
             prompt_version="extractor_v3",
         )
@@ -691,4 +693,95 @@ async def export_to_excel(
         path=filepath,
         filename=filename,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+# =============================================================================
+# On-demand export endpoints — build from stored run_id, no file re-upload
+# =============================================================================
+
+@app.post("/v1/export/docs/excel")
+async def export_excel_from_run(
+    run_id: str = Form(...),
+    borrower_name: Optional[str] = Form(None),
+):
+    """
+    Build and download an Excel workbook from a previously completed run.
+    No file re-upload required — uses stored extracted_json from RunStore.
+    """
+    import os, tempfile
+    from doc_builder import _build_excel
+
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+    if run.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Run is {run.status!r} — export requires a completed run")
+
+    display_name = (borrower_name or run.filename or "Company").replace(".htm","").replace(".pdf","")
+    safe_name = display_name.replace(" ", "_").replace("/", "-")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = os.path.join(tmpdir, f"{safe_name}_credit_summary.xlsx")
+        _build_excel(run, display_name, out_path)
+        final_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{safe_name}_credit_summary.xlsx")
+        import shutil
+        shutil.copy(out_path, final_path)
+
+    logger.info(f"export/docs/excel: run={run_id} borrower={display_name!r}")
+    return FileResponse(
+        path=final_path,
+        filename=f"{safe_name}_credit_summary.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.post("/v1/export/docs/word")
+async def export_word_from_run(
+    run_id: str = Form(...),
+    borrower_name: Optional[str] = Form(None),
+    covenants_json: Optional[str] = Form(None),   # JSON string: {"max_total_leverage":4.5,"min_fcc":1.15}
+):
+    """
+    Build and download a narrative Word document from a previously completed run.
+    Uses stored extracted_json + mda_summary from RunStore; calls segment_parser
+    to structure MD&A into segments automatically.
+    """
+    import os, tempfile, json as _json
+    from segment_parser import build_word_narrative_v2
+
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+    if run.status != "completed":
+        raise HTTPException(status_code=400, detail=f"Run is {run.status!r} — export requires a completed run")
+
+    display_name = (borrower_name or run.filename or "Company").replace(".htm","").replace(".pdf","")
+    safe_name = display_name.replace(" ", "_").replace("/", "-")
+
+    covenants = {}
+    if covenants_json:
+        try:
+            covenants = _json.loads(covenants_json)
+        except Exception:
+            pass
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = os.path.join(tmpdir, f"{safe_name}_credit_memo.docx")
+        build_word_narrative_v2(
+            run_record=run,
+            borrower_name=display_name,
+            output_path=out_path,
+            memo_markdown=run.memo_markdown,
+            mda_summary=run.mda_summary,
+            covenants=covenants,
+        )
+        final_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{safe_name}_credit_memo.docx")
+        import shutil
+        shutil.copy(out_path, final_path)
+
+    logger.info(f"export/docs/word: run={run_id} borrower={display_name!r}")
+    return FileResponse(
+        path=final_path,
+        filename=f"{safe_name}_credit_memo.docx",
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )

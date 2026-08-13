@@ -185,6 +185,87 @@
             border-left: 4px solid #dc3545;
         }
 
+        /* ── Export buttons bar ──────────────────────────────────── */
+        .export-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 18px;
+            background: #f8f9ff;
+            border: 1px solid #e0e6ff;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .export-bar-label {
+            font-size: 13px;
+            font-weight: 700;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-right: 4px;
+        }
+
+        .btn-export {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 9px 18px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+        }
+
+        .btn-export:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .btn-excel {
+            background: #e8f5e9;
+            color: #2e7d32;
+            border: 1.5px solid #a5d6a7;
+        }
+
+        .btn-excel:hover:not(:disabled) {
+            background: #c8e6c9;
+            transform: translateY(-1px);
+        }
+
+        .btn-word {
+            background: #e8eeff;
+            color: #3949ab;
+            border: 1.5px solid #9fa8da;
+        }
+
+        .btn-word:hover:not(:disabled) {
+            background: #c5cae9;
+            transform: translateY(-1px);
+        }
+
+        .export-spinner {
+            display: inline-block;
+            width: 13px;
+            height: 13px;
+            border: 2px solid currentColor;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+
+        .export-error {
+            font-size: 13px;
+            color: #dc3545;
+            background: #fff5f5;
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: 1px solid #f5c6cb;
+        }
+        /* ─────────────────────────────────────────────────────────── */
+
         .tabs {
             display: flex;
             gap: 10px;
@@ -507,6 +588,19 @@
         <div class="results-section" id="resultsSection">
             <div id="statusBanner"></div>
 
+            <!-- ── Export bar — shown once a run completes ── -->
+            <div class="export-bar" id="exportBar" style="display:none;">
+                <span class="export-bar-label">Export</span>
+                <button class="btn-export btn-excel" id="exportExcelBtn" onclick="exportFile('excel')">
+                    📊 Excel
+                </button>
+                <button class="btn-export btn-word" id="exportWordBtn" onclick="exportFile('word')">
+                    📄 Word Doc
+                </button>
+                <span id="exportStatus" style="font-size:13px; color:#888;"></span>
+            </div>
+            <!-- ──────────────────────────────────────────── -->
+
             <div class="tabs">
                 <button class="tab active" data-tab="memo">Credit Memo</button>
                 <button class="tab" data-tab="mda">MD&A Insights</button>
@@ -550,6 +644,78 @@
         const loadingSection = document.getElementById('loadingSection');
 
         let selectedFile = null;
+
+        // ── Stores run_id and borrower name after analysis completes ──────────
+        let currentRunId   = null;
+        let currentBorrower = null;
+
+        // ── Export handler ────────────────────────────────────────────────────
+        async function exportFile(type) {
+            if (!currentRunId) return;
+
+            const btn       = type === 'excel' ? document.getElementById('exportExcelBtn') : document.getElementById('exportWordBtn');
+            const statusEl  = document.getElementById('exportStatus');
+            const endpoint  = type === 'excel' ? '/v1/export/docs/excel' : '/v1/export/docs/word';
+            const ext       = type === 'excel' ? 'xlsx' : 'docx';
+            const mime      = type === 'excel'
+                ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+            // Disable both buttons while working
+            document.getElementById('exportExcelBtn').disabled = true;
+            document.getElementById('exportWordBtn').disabled  = true;
+            btn.innerHTML = type === 'excel'
+                ? '<span class="export-spinner"></span> Building…'
+                : '<span class="export-spinner"></span> Building… (30–60s)';
+            statusEl.textContent = type === 'word' ? 'Parsing MD&A segments…' : '';
+
+            try {
+                const body = new FormData();
+                body.append('run_id', currentRunId);
+                if (currentBorrower) body.append('borrower_name', currentBorrower);
+
+                // Pass covenants to Word doc if set
+                if (type === 'word') {
+                    const maxLev = document.getElementById('maxLeverage').value;
+                    const minFcc = document.getElementById('minFCC').value;
+                    if (maxLev || minFcc) {
+                        const cov = {};
+                        if (maxLev) cov.max_total_leverage = parseFloat(maxLev);
+                        if (minFcc) cov.min_fcc            = parseFloat(minFcc);
+                        body.append('covenants_json', JSON.stringify(cov));
+                    }
+                }
+
+                const res = await fetch(`http://localhost:8000${endpoint}`, { method: 'POST', body });
+
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({ detail: 'Export failed' }));
+                    throw new Error(err.detail || 'Export failed');
+                }
+
+                const blob     = await res.blob();
+                const safeName = (currentBorrower || 'Company').replace(/\s+/g, '_');
+                const url      = URL.createObjectURL(blob);
+                const a        = document.createElement('a');
+                a.href         = url;
+                a.download     = `${safeName}_credit_${type === 'excel' ? 'summary' : 'memo'}.${ext}`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                statusEl.textContent = '';
+
+            } catch (e) {
+                statusEl.innerHTML = `<span style="color:#dc3545;">⚠ ${e.message}</span>`;
+            } finally {
+                document.getElementById('exportExcelBtn').disabled = false;
+                document.getElementById('exportWordBtn').disabled  = false;
+                document.getElementById('exportExcelBtn').innerHTML = '📊 Excel';
+                document.getElementById('exportWordBtn').innerHTML  = '📄 Word Doc';
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         fileUpload.addEventListener('click', () => fileInput.click());
 
@@ -623,6 +789,9 @@
             loadingSection.style.display = 'block';
             analyzeBtn.disabled = true;
 
+            // Hide export bar while re-running
+            document.getElementById('exportBar').style.display = 'none';
+
             try {
                 const response = await fetch('http://localhost:8000/v1/analyze', {
                     method: 'POST',
@@ -646,6 +815,15 @@
         });
 
         function displayResults(data) {
+            // ── Store run context for export buttons ──────────────────────────
+            currentRunId    = data.run_id || null;
+            currentBorrower = document.getElementById('borrowerName').value || null;
+
+            // Show export bar if we have a run_id
+            const exportBar = document.getElementById('exportBar');
+            exportBar.style.display = currentRunId ? 'flex' : 'none';
+            // ─────────────────────────────────────────────────────────────────
+
             // Status banner
             const statusBanner = document.getElementById('statusBanner');
             const completeness = data.completeness * 100;
@@ -693,70 +871,40 @@
         function formatMdaInsights(mdaText) {
             let html = '<div class="memo-content">';
 
-            // Check for warnings
             if (mdaText.includes('⚠️')) {
                 const warnings = mdaText.split('\n').filter(line => line.includes('⚠️'));
                 html += '<div class="validation-flags"><h4>Extraction Warnings</h4><ul>';
-                warnings.forEach(warning => {
-                    html += `<li>${warning}</li>`;
-                });
+                warnings.forEach(warning => { html += `<li>${warning}</li>`; });
                 html += '</ul></div>';
             }
 
-            // Check for SEGMENTS IDENTIFIED
             const segmentsMatch = mdaText.match(/SEGMENTS IDENTIFIED:([^\n]+)/i);
             if (segmentsMatch) {
-                const segmentsText = segmentsMatch[1].trim();
-                const segmentsList = segmentsText.split(',').map(s => s.trim()).filter(s => s);
+                const segmentsList = segmentsMatch[1].trim().split(',').map(s => s.trim()).filter(s => s);
                 const segmentBadges = segmentsList.map(seg => `<span class="segment-badge">${seg}</span>`).join('');
-
-                html += `
-                    <div class="segments-identified">
-                        <h4>Business Segments Identified:</h4>
-                        <div style="margin-top: 10px;">
-                            ${segmentBadges}
-                        </div>
-                    </div>
-                `;
+                html += `<div class="segments-identified"><h4>Business Segments Identified:</h4><div style="margin-top:10px;">${segmentBadges}</div></div>`;
             }
 
-            // Split by segment headers
             const segmentRegex = /\*\*SEGMENT: ([^\*]+)\*\*/g;
             const segments = [];
             let match;
             let lastIndex = 0;
 
             while ((match = segmentRegex.exec(mdaText)) !== null) {
-                if (lastIndex > 0) {
-                    segments.push({
-                        name: segments[segments.length - 1].name,
-                        content: mdaText.substring(lastIndex, match.index)
-                    });
-                }
+                if (lastIndex > 0) segments.push({ name: segments[segments.length - 1].name, content: mdaText.substring(lastIndex, match.index) });
                 segments.push({ name: match[1].trim() });
                 lastIndex = segmentRegex.lastIndex;
             }
 
-            if (lastIndex > 0 && segments.length > 0) {
-                segments[segments.length - 1].content = mdaText.substring(lastIndex);
-            }
+            if (lastIndex > 0 && segments.length > 0) segments[segments.length - 1].content = mdaText.substring(lastIndex);
 
-            // Display segments
             segments.forEach(segment => {
                 if (segment.content) {
-                    html += `
-                        <div class="segment-card">
-                            <h4>${segment.name}</h4>
-                            ${formatSegmentContent(segment.content)}
-                        </div>
-                    `;
+                    html += `<div class="segment-card"><h4>${segment.name}</h4>${formatSegmentContent(segment.content)}</div>`;
                 }
             });
 
-            // If no segments found, just show the raw text
-            if (segments.length === 0) {
-                html += `<pre>${mdaText}</pre>`;
-            }
+            if (segments.length === 0) html += `<pre>${mdaText}</pre>`;
 
             html += '</div>';
             return html;
@@ -772,77 +920,35 @@
                 line = line.trim();
                 if (!line) return;
 
-                // Main section headers (REVENUE:, GROSS MARGIN:, etc.)
                 if (line.match(/^(REVENUE|GROSS MARGIN|OPERATING INCOME|EBITDA|COSTS):/i)) {
-                    if (inList) {
-                        html += '</ul>';
-                        inList = false;
-                    }
-                    if (inSubsection) {
-                        html += '</div>';
-                        inSubsection = false;
-                    }
-                    html += `<div style="margin-top: 18px; margin-bottom: 12px;">
-                        <h5 style="color: #667eea; margin-bottom: 8px; font-size: 16px; font-weight: 700;">${line}</h5>`;
-                }
-                // Sub-section headers with specific patterns
-                else if (line.match(/^(Revenue change drivers|Gross margin change drivers|Volume\/Price detail|Input costs|Production metrics|COGS drivers|Operating margin drivers):/i)) {
-                    if (inList) {
-                        html += '</ul>';
-                        inList = false;
-                    }
-                    if (inSubsection) {
-                        html += '</div>';
-                    }
-                    html += `<div class="segment-subsection">
-                        <div class="segment-subsection-header">${line}</div>`;
+                    if (inList) { html += '</ul>'; inList = false; }
+                    if (inSubsection) { html += '</div>'; inSubsection = false; }
+                    html += `<div style="margin-top:18px;margin-bottom:12px;"><h5 style="color:#667eea;margin-bottom:8px;font-size:16px;font-weight:700;">${line}</h5>`;
+                } else if (line.match(/^(Revenue change drivers|Gross margin change drivers|Volume\/Price detail|Input costs|Production metrics|COGS drivers|Operating margin drivers):/i)) {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    if (inSubsection) html += '</div>';
+                    html += `<div class="segment-subsection"><div class="segment-subsection-header">${line}</div>`;
                     inSubsection = true;
-                }
-                // List items (bullets)
-                else if (line.startsWith('- ')) {
-                    if (!inList) {
-                        html += '<ul class="driver-list">';
-                        inList = true;
-                    }
+                } else if (line.startsWith('- ')) {
+                    if (!inList) { html += '<ul class="driver-list">'; inList = true; }
                     const isOffsetting = line.includes('OFFSETTING:');
-                    const cssClass = isOffsetting ? 'offsetting' : '';
-                    const cleanedLine = line.substring(2);
-                    html += `<li class="${cssClass}">${cleanedLine}</li>`;
-                }
-                // Data lines (Net sales: $X.X billion, Volumes: X.X million tonnes, etc.)
-                else if (line.includes(':')) {
-                    if (inList) {
-                        html += '</ul>';
-                        inList = false;
-                    }
-                    // Check if this is a metric/data line
+                    html += `<li class="${isOffsetting ? 'offsetting' : ''}">${line.substring(2)}</li>`;
+                } else if (line.includes(':')) {
+                    if (inList) { html += '</ul>'; inList = false; }
                     if (line.match(/:\s*[\$\d]/) || line.match(/:\s*\d+\.?\d*\s*(million|billion|%|tonnes|MM|K)/i)) {
                         html += `<div class="metric-detail">${line}</div>`;
                     } else {
-                        // Other descriptive lines
-                        html += `<div style="margin-left: 15px; margin-top: 8px; color: #666; font-size: 14px;">${line}</div>`;
+                        html += `<div style="margin-left:15px;margin-top:8px;color:#666;font-size:14px;">${line}</div>`;
                     }
-                }
-                // Plain text lines
-                else {
-                    if (inList) {
-                        html += '</ul>';
-                        inList = false;
-                    }
-                    html += `<div style="margin-left: 15px; margin-top: 6px; color: #555; font-size: 14px;">${line}</div>`;
+                } else {
+                    if (inList) { html += '</ul>'; inList = false; }
+                    html += `<div style="margin-left:15px;margin-top:6px;color:#555;font-size:14px;">${line}</div>`;
                 }
             });
 
-            // Close any open tags
-            if (inList) {
-                html += '</ul>';
-            }
-            if (inSubsection) {
-                html += '</div>';
-            }
-
-            html += '</div>'; // Close the main section div
-
+            if (inList) html += '</ul>';
+            if (inSubsection) html += '</div>';
+            html += '</div>';
             return html;
         }
 
@@ -858,279 +964,139 @@
             const priorPeriod = extracted.periods.length > 1 ? extracted.periods[1] : null;
 
             const metrics = [
-                {
-                    label: 'Revenue',
-                    current: currentPeriod.income_statement?.revenue,
-                    prior: priorPeriod?.income_statement?.revenue,
-                    format: '$',
-                    basis: extracted.statement_basis
-                },
-                {
-                    label: 'EBITDA',
-                    current: currentPeriod.income_statement?.ebitda,
-                    prior: priorPeriod?.income_statement?.ebitda,
-                    format: '$',
-                    basis: extracted.statement_basis
-                },
-                {
-                    label: 'EBITDA Margin',
-                    current: currentPeriod.derived_metrics?.ebitda_margin,
-                    prior: priorPeriod?.derived_metrics?.ebitda_margin,
-                    format: '%'
-                },
-                {
-                    label: 'Total Debt',
-                    current: currentPeriod.balance_sheet?.total_debt,
-                    prior: priorPeriod?.balance_sheet?.total_debt,
-                    format: '$',
-                    basis: extracted.statement_basis
-                },
-                {
-                    label: 'Leverage (Debt/EBITDA)',
-                    current: currentPeriod.derived_metrics?.leverage_total_debt_to_ebitda,
-                    prior: priorPeriod?.derived_metrics?.leverage_total_debt_to_ebitda,
-                    format: 'x'
-                },
-                {
-                    label: 'FCC',
-                    current: currentPeriod.derived_metrics?.fcc,
-                    prior: priorPeriod?.derived_metrics?.fcc,
-                    format: 'x'
-                }
+                { label: 'Revenue',                  current: currentPeriod.income_statement?.revenue,                                   prior: priorPeriod?.income_statement?.revenue,                                   format: '$', basis: extracted.statement_basis },
+                { label: 'EBITDA',                   current: currentPeriod.income_statement?.ebitda,                                    prior: priorPeriod?.income_statement?.ebitda,                                    format: '$', basis: extracted.statement_basis },
+                { label: 'EBITDA Margin',            current: currentPeriod.derived_metrics?.ebitda_margin,                              prior: priorPeriod?.derived_metrics?.ebitda_margin,                              format: '%' },
+                { label: 'Total Debt',               current: currentPeriod.balance_sheet?.total_debt,                                   prior: priorPeriod?.balance_sheet?.total_debt,                                   format: '$', basis: extracted.statement_basis },
+                { label: 'Leverage (Debt/EBITDA)',   current: currentPeriod.derived_metrics?.leverage_total_debt_to_ebitda,              prior: priorPeriod?.derived_metrics?.leverage_total_debt_to_ebitda,              format: 'x' },
+                { label: 'FCC',                      current: currentPeriod.derived_metrics?.fcc,                                        prior: priorPeriod?.derived_metrics?.fcc,                                        format: 'x' },
             ];
 
             let html = '<div class="metrics-grid">';
 
-            // Add Credit Risk Assessment cards first (if available)
-            const pdScore = currentPeriod.derived_metrics?.pd_score;
+            const pdScore    = currentPeriod.derived_metrics?.pd_score;
             const creditRating = currentPeriod.derived_metrics?.credit_rating;
-            const zScore = currentPeriod.derived_metrics?.altman_z_score;
+            const zScore     = currentPeriod.derived_metrics?.altman_z_score;
 
             if (pdScore !== null && pdScore !== undefined) {
-                // Determine color based on PD score
-                let pdColor = '#28a745'; // Green for investment grade
-                if (pdScore >= 10) pdColor = '#dc3545'; // Red for high risk/default
-                else if (pdScore >= 7) pdColor = '#fd7e14'; // Orange for speculative
-                else if (pdScore >= 4) pdColor = '#ffc107'; // Yellow for non-investment grade
-
-                html += `
-                    <div class="metric-card" style="border-left: 4px solid ${pdColor}; background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);">
-                        <div class="metric-label">PD Score (Probability of Default)</div>
-                        <div class="metric-value" style="color: ${pdColor}; font-size: 36px; font-weight: 700;">${pdScore}/12</div>
-                        ${creditRating ? `<div class="metric-change" style="font-weight: 600; color: ${pdColor};">${creditRating}</div>` : ''}
-                        <div style="font-size: 12px; color: #666; margin-top: 8px;">1-3: Investment | 4-6: Non-IG | 7-9: Speculative | 10-12: High Risk</div>
-                    </div>
-                `;
+                let pdColor = '#28a745';
+                if (pdScore >= 10) pdColor = '#dc3545';
+                else if (pdScore >= 7) pdColor = '#fd7e14';
+                else if (pdScore >= 4) pdColor = '#ffc107';
+                html += `<div class="metric-card" style="border-left:4px solid ${pdColor};background:linear-gradient(135deg,#ffffff 0%,#f8f9fa 100%);">
+                    <div class="metric-label">PD Score (Probability of Default)</div>
+                    <div class="metric-value" style="color:${pdColor};font-size:36px;font-weight:700;">${pdScore}/12</div>
+                    ${creditRating ? `<div class="metric-change" style="font-weight:600;color:${pdColor};">${creditRating}</div>` : ''}
+                    <div style="font-size:12px;color:#666;margin-top:8px;">1-3: Investment | 4-6: Non-IG | 7-9: Speculative | 10-12: High Risk</div>
+                </div>`;
             }
 
             if (zScore !== null && zScore !== undefined) {
-                // Determine color based on Z-Score
-                let zColor = '#28a745'; // Green for safe zone
-                let zZone = 'Safe Zone';
-                if (zScore < 1.23) {
-                    zColor = '#dc3545'; // Red for distress
-                    zZone = 'Distress Zone';
-                } else if (zScore < 2.9) {
-                    zColor = '#ffc107'; // Yellow for grey zone
-                    zZone = 'Grey Zone';
-                }
-
-                html += `
-                    <div class="metric-card" style="border-left: 4px solid ${zColor}; background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);">
-                        <div class="metric-label">Altman Z-Score</div>
-                        <div class="metric-value" style="color: ${zColor}; font-size: 36px; font-weight: 700;">${zScore.toFixed(2)}</div>
-                        <div class="metric-change" style="font-weight: 600; color: ${zColor};">${zZone}</div>
-                        <div style="font-size: 12px; color: #666; margin-top: 8px;">Z > 2.9: Safe | 1.23-2.9: Grey | Z < 1.23: Distress</div>
-                    </div>
-                `;
+                let zColor = '#28a745', zZone = 'Safe Zone';
+                if (zScore < 1.23) { zColor = '#dc3545'; zZone = 'Distress Zone'; }
+                else if (zScore < 2.9) { zColor = '#ffc107'; zZone = 'Grey Zone'; }
+                html += `<div class="metric-card" style="border-left:4px solid ${zColor};background:linear-gradient(135deg,#ffffff 0%,#f8f9fa 100%);">
+                    <div class="metric-label">Altman Z-Score</div>
+                    <div class="metric-value" style="color:${zColor};font-size:36px;font-weight:700;">${zScore.toFixed(2)}</div>
+                    <div class="metric-change" style="font-weight:600;color:${zColor};">${zZone}</div>
+                    <div style="font-size:12px;color:#666;margin-top:8px;">Z > 2.9: Safe | 1.23-2.9: Grey | Z < 1.23: Distress</div>
+                </div>`;
             }
 
             metrics.forEach(metric => {
                 const suffix = metric.basis === 'millions' ? 'MM' : (metric.basis === 'thousands' ? 'K' : '');
-                let value = 'N/A';
-                let change = '';
-
+                let value = 'N/A', change = '';
                 if (metric.current !== null && metric.current !== undefined) {
-                    if (metric.format === '$') {
-                        value = `$${metric.current.toLocaleString()}${suffix}`;
-                    } else if (metric.format === '%') {
-                        value = `${(metric.current * 100).toFixed(1)}%`;
-                    } else if (metric.format === 'x') {
-                        value = `${metric.current.toFixed(2)}x`;
-                    }
-
+                    if (metric.format === '$') value = `$${metric.current.toLocaleString()}${suffix}`;
+                    else if (metric.format === '%') value = `${(metric.current * 100).toFixed(1)}%`;
+                    else if (metric.format === 'x') value = `${metric.current.toFixed(2)}x`;
                     if (metric.prior !== null && metric.prior !== undefined) {
-                        const pctChange = ((metric.current - metric.prior) / metric.prior * 100);
-                        const arrow = pctChange > 0 ? '↑' : '↓';
-                        change = `${arrow} ${Math.abs(pctChange).toFixed(1)}% YoY`;
+                        const pct = ((metric.current - metric.prior) / metric.prior * 100);
+                        change = `${pct > 0 ? '↑' : '↓'} ${Math.abs(pct).toFixed(1)}% YoY`;
                     }
                 }
-
-                html += `
-                    <div class="metric-card">
-                        <div class="metric-label">${metric.label}</div>
-                        <div class="metric-value">${value}</div>
-                        ${change ? `<div class="metric-change">${change}</div>` : ''}
-                    </div>
-                `;
+                html += `<div class="metric-card">
+                    <div class="metric-label">${metric.label}</div>
+                    <div class="metric-value">${value}</div>
+                    ${change ? `<div class="metric-change">${change}</div>` : ''}
+                </div>`;
             });
 
             html += '</div>';
-
-            // Add period names
-            html += `<p style="color: #666; font-size: 14px; margin-top: 20px;">
-                Current Period: ${currentPeriod.period_name}
-                ${priorPeriod ? ` | Prior Period: ${priorPeriod.period_name}` : ''}
-            </p>`;
-
+            html += `<p style="color:#666;font-size:14px;margin-top:20px;">Current Period: ${currentPeriod.period_name}${priorPeriod ? ` | Prior Period: ${priorPeriod.period_name}` : ''}</p>`;
             metricsContent.innerHTML = html;
         }
 
         function displayFinancials(extracted) {
             const financialsContent = document.getElementById('financialsContent');
-
-            if (!extracted.periods || extracted.periods.length === 0) {
-                financialsContent.innerHTML = '<p>No financial data available</p>';
-                return;
-            }
+            if (!extracted.periods || extracted.periods.length === 0) { financialsContent.innerHTML = '<p>No financial data available</p>'; return; }
 
             const suffix = extracted.statement_basis === 'millions' ? 'MM' : (extracted.statement_basis === 'thousands' ? 'K' : '');
-
             let html = `<h3>Statement Basis: ${extracted.statement_basis}</h3>`;
 
-            // Income Statement
-            html += '<h3 style="margin-top: 30px;">Income Statement</h3>';
-            html += '<table class="financial-table"><thead><tr><th>Line Item</th>';
-            extracted.periods.forEach(p => {
-                html += `<th>${p.period_name}</th>`;
-            });
-            html += '</tr></thead><tbody>';
-
-            const isItems = [
-                ['Revenue', 'revenue'],
-                ['Cost of Sales', 'cost_of_sales'],
-                ['SG&A Expense', 'sga_expense'],
-                ['Operating Income', 'operating_income'],
-                ['EBITDA', 'ebitda'],
-                ['Net Income', 'net_income'],
-                ['Depreciation & Amortization', 'depreciation_amortization'],
-                ['Interest Expense', 'interest_expense'],
-                ['Income Tax Expense', 'income_tax_expense']
-            ];
-
-            isItems.forEach(([label, field]) => {
-                html += `<tr><td><strong>${label}</strong></td>`;
-                extracted.periods.forEach(p => {
-                    const value = p.income_statement?.[field];
-                    html += `<td>${value !== null && value !== undefined ? `$${value.toLocaleString()}${suffix}` : 'N/A'}</td>`;
+            const buildTable = (title, items, section) => {
+                html += `<h3 style="margin-top:30px;">${title}</h3>`;
+                html += '<table class="financial-table"><thead><tr><th>Line Item</th>';
+                extracted.periods.forEach(p => { html += `<th>${p.period_name}</th>`; });
+                html += '</tr></thead><tbody>';
+                items.forEach(([label, field]) => {
+                    html += `<tr><td><strong>${label}</strong></td>`;
+                    extracted.periods.forEach(p => {
+                        const v = p[section]?.[field];
+                        html += `<td>${v !== null && v !== undefined ? `$${v.toLocaleString()}${suffix}` : 'N/A'}</td>`;
+                    });
+                    html += '</tr>';
                 });
-                html += '</tr>';
-            });
+                html += '</tbody></table>';
+            };
 
-            html += '</tbody></table>';
+            buildTable('Income Statement', [
+                ['Revenue','revenue'],['Cost of Sales','cost_of_sales'],['SG&A Expense','sga_expense'],
+                ['Operating Income','operating_income'],['EBITDA','ebitda'],['Net Income','net_income'],
+                ['D&A','depreciation_amortization'],['Interest Expense','interest_expense'],['Income Tax Expense','income_tax_expense']
+            ], 'income_statement');
 
-            // Balance Sheet
-            html += '<h3 style="margin-top: 30px;">Balance Sheet</h3>';
-            html += '<table class="financial-table"><thead><tr><th>Line Item</th>';
-            extracted.periods.forEach(p => {
-                html += `<th>${p.period_name}</th>`;
-            });
-            html += '</tr></thead><tbody>';
+            buildTable('Balance Sheet', [
+                ['Cash','cash'],['Total Assets','total_assets'],['Total Liabilities','total_liabilities'],
+                ['Total Equity','total_equity'],['Total Debt','total_debt'],['Long-term Debt','long_term_debt'],
+                ['Current Portion LT Debt','current_portion_long_term_debt']
+            ], 'balance_sheet');
 
-            const bsItems = [
-                ['Cash', 'cash'],
-                ['Total Assets', 'total_assets'],
-                ['Total Liabilities', 'total_liabilities'],
-                ['Total Equity', 'total_equity'],
-                ['Total Debt', 'total_debt'],
-                ['Long-term Debt', 'long_term_debt'],
-                ['Current Portion LT Debt', 'current_portion_long_term_debt']
-            ];
-
-            bsItems.forEach(([label, field]) => {
-                html += `<tr><td><strong>${label}</strong></td>`;
-                extracted.periods.forEach(p => {
-                    const value = p.balance_sheet?.[field];
-                    html += `<td>${value !== null && value !== undefined ? `$${value.toLocaleString()}${suffix}` : 'N/A'}</td>`;
-                });
-                html += '</tr>';
-            });
-
-            html += '</tbody></table>';
-
-            // Cash Flow
-            html += '<h3 style="margin-top: 30px;">Cash Flow Statement</h3>';
-            html += '<table class="financial-table"><thead><tr><th>Line Item</th>';
-            extracted.periods.forEach(p => {
-                html += `<th>${p.period_name}</th>`;
-            });
-            html += '</tr></thead><tbody>';
-
-            const cfItems = [
-                ['Operating Cash Flow', 'cfo'],
-                ['Investing Cash Flow', 'cfi'],
-                ['Financing Cash Flow', 'cff'],
-                ['Capex', 'capex'],
-                ['Cash Interest Paid', 'cash_paid_for_interest'],
-                ['Cash Taxes Paid', 'cash_paid_for_income_taxes']
-            ];
-
-            cfItems.forEach(([label, field]) => {
-                html += `<tr><td><strong>${label}</strong></td>`;
-                extracted.periods.forEach(p => {
-                    const value = p.cash_flow?.[field];
-                    html += `<td>${value !== null && value !== undefined ? `$${value.toLocaleString()}${suffix}` : 'N/A'}</td>`;
-                });
-                html += '</tr>';
-            });
-
-            html += '</tbody></table>';
+            buildTable('Cash Flow Statement', [
+                ['Operating Cash Flow','cfo'],['Investing Cash Flow','cfi'],['Financing Cash Flow','cff'],
+                ['Capex','capex'],['Cash Interest Paid','cash_paid_for_interest'],['Cash Taxes Paid','cash_paid_for_income_taxes']
+            ], 'cash_flow');
 
             financialsContent.innerHTML = html;
         }
 
         function markdownToHtml(markdown) {
             let html = markdown;
-
-            // Convert headers
             html = html.replace(/^### (.*$)/gim, '<h3>$1</h3>');
             html = html.replace(/^## (.*$)/gim, '<h2>$1</h2>');
             html = html.replace(/^# (.*$)/gim, '<h2>$1</h2>');
-
-            // Convert bold
             html = html.replace(/\*\*(.*?)\*\*/gim, '<strong>$1</strong>');
             html = html.replace(/__(.*?)__/gim, '<strong>$1</strong>');
-
-            // Convert italic
             html = html.replace(/\*(.*?)\*/gim, '<em>$1</em>');
             html = html.replace(/_(.*?)_/gim, '<em>$1</em>');
-
-            // Convert lists
             html = html.replace(/^\s*- (.*$)/gim, '<li>$1</li>');
             html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
-
-            // Convert line breaks
             html = html.replace(/\n\n/g, '</p><p>');
             html = '<p>' + html + '</p>';
-
-            // Clean up empty paragraphs
             html = html.replace(/<p>\s*<\/p>/g, '');
             html = html.replace(/<p>(<h[23]>)/g, '$1');
             html = html.replace(/(<\/h[23]>)<\/p>/g, '$1');
             html = html.replace(/<p>(<ul>)/g, '$1');
             html = html.replace(/(<\/ul>)<\/p>/g, '$1');
-
             return html;
         }
 
         function displayError(message) {
+            document.getElementById('exportBar').style.display = 'none';
             const statusBanner = document.getElementById('statusBanner');
             statusBanner.className = 'status-banner error';
             statusBanner.innerHTML = `<strong>Error:</strong> ${message}`;
-
-            const memoContent = document.getElementById('memoContent');
-            memoContent.innerHTML = '<p>Analysis failed. Please try again.</p>';
-
+            document.getElementById('memoContent').innerHTML = '<p>Analysis failed. Please try again.</p>';
             resultsSection.classList.add('show');
         }
     </script>

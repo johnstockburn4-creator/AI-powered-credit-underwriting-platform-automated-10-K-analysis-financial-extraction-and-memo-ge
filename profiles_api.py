@@ -9,7 +9,11 @@ Add to main.py:
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+import json
+import logging
 import profiles as ps
+
+logger = logging.getLogger("credit_ai")
 
 profiles_router = APIRouter(prefix="/v1/profiles", tags=["profiles"])
 
@@ -161,29 +165,48 @@ async def get_field_context(
     extracted_value: Optional[float] = None,
 ):
     """
-    Returns the raw document context around where a field value was extracted.
+    Returns the document context around where a field value was extracted.
     Used by the Review & Correct UI to show "what the extractor found".
 
-    This requires access to the raw text from the run — fetched from RunStore.
+    NOTE: RunStore does not persist raw filing text (and shouldn't — filings can
+    be tens of MB and contain sensitive borrower data). Context is instead read
+    from the per-field notes that extract_financials_from_text() already writes
+    onto each period at extraction time, in the form:
+        "CONTEXT:{field_name}:{json_blob}"
+    This is the same source the ReviewCorrect.jsx frontend reads directly off
+    `extracted.periods[].notes` — this endpoint exists for callers that only
+    have a run_id and don't already hold the extracted payload client-side.
     """
     try:
         from run_store import RunStore
         store = RunStore()
         run = store.get_run(run_id)
-        if not run or not run.raw_text:
-            return {"context": None, "message": "Raw text not available for this run"}
+        if not run or not run.extracted_json:
+            return {"context": None, "message": "Run not found or not completed"}
 
-        context = ps.extract_field_context(
-            raw_text=run.raw_text,
-            field_name=field_name,
-            extracted_value=extracted_value,
-            context_lines=3,
-        )
+        periods = (run.extracted_json or {}).get("periods") or []
+        prefix = f"CONTEXT:{field_name}:"
+
+        for period in periods:
+            for note in period.get("notes") or []:
+                if isinstance(note, str) and note.startswith(prefix):
+                    raw = note[len(prefix):]
+                    try:
+                        context = json.loads(raw)
+                    except json.JSONDecodeError:
+                        context = {"raw": raw, "formatted": None, "matched_line": None, "score": None}
+                    return {
+                        "company": company_name,
+                        "field": field_name,
+                        "period": period.get("period_name"),
+                        "extracted_value": extracted_value,
+                        "context": context,
+                    }
+
         return {
-            "company": company_name,
-            "field": field_name,
-            "extracted_value": extracted_value,
-            "context": context,
+            "context": None,
+            "message": f"No stored extraction context found for '{field_name}' on run {run_id}.",
         }
     except Exception as e:
+        logger.error(f"get_field_context failed for run={run_id} field={field_name}: {e}")
         return {"context": None, "message": str(e)}

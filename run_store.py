@@ -35,6 +35,7 @@ class RunRecord:
     excerpt_preview: Optional[str]
     model_raw_preview: Optional[str]
     memo_markdown: Optional[str]
+    mda_summary: Optional[str] = None   # persisted so export-on-demand doesn't need re-extraction
     # Optional metadata (backward-compatible)
     model_name: Optional[str] = None
     prompt_version: Optional[str] = None
@@ -97,6 +98,7 @@ class RunStore:
             self._ensure_column(conn, "runs", "statement_basis", "TEXT")
             self._ensure_column(conn, "runs", "period_count", "INTEGER")
             self._ensure_column(conn, "runs", "memo_markdown", "TEXT")
+            self._ensure_column(conn, "runs", "mda_summary",   "TEXT")
 
             conn.commit()
 
@@ -156,6 +158,7 @@ class RunStore:
         excerpt_preview: Optional[str] = None,
         model_raw_preview: Optional[str] = None,
         memo_markdown: Optional[str] = None,
+        mda_summary: Optional[str] = None,
         model_name: Optional[str] = None,
         prompt_version: Optional[str] = None,
     ) -> None:
@@ -176,6 +179,7 @@ class RunStore:
             excerpt_preview=excerpt_preview,
             model_raw_preview=model_raw_preview,
             memo_markdown=memo_markdown,
+            mda_summary=mda_summary,
             error=None,
             model_name=model_name,
             prompt_version=prompt_version,
@@ -223,6 +227,7 @@ class RunStore:
             excerpt_preview=row["excerpt_preview"],
             model_raw_preview=row["model_raw_preview"],
             memo_markdown=_get("memo_markdown"),
+            mda_summary=_get("mda_summary"),
             model_name=_get("model_name"),
             prompt_version=_get("prompt_version"),
             statement_basis=_get("statement_basis"),
