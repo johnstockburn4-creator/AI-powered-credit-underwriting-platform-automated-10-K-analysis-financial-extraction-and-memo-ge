@@ -310,6 +310,15 @@ def _generate_memo(
 # ANALYZE ENDPOINT
 # ============================================================
 
+
+@app.post("/v1/auth/verify")
+async def verify_access(x_access_code: Optional[str] = Header(None)):
+    expected = os.environ.get("ACCESS_CODE", "")
+    if not expected:
+        return {"status": "ok", "mode": "open"}
+    if x_access_code != expected:
+        raise HTTPException(status_code=401, detail="Invalid access code")
+    return {"status": "ok", "mode": "protected"}
 @app.post("/v1/analyze")
 async def analyze_single(
     file: UploadFile = File(...),
