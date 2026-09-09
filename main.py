@@ -12,7 +12,7 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from bs4 import BeautifulSoup
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 
@@ -312,11 +312,12 @@ def _generate_memo(
 
 
 @app.post("/v1/auth/verify")
-async def verify_access(x_access_code: Optional[str] = Header(None)):
+async def verify_access(request: Request):
     expected = os.environ.get("ACCESS_CODE", "")
     if not expected:
         return {"status": "ok", "mode": "open"}
-    if x_access_code != expected:
+    code = request.headers.get("x-access-code", "")
+    if code != expected:
         raise HTTPException(status_code=401, detail="Invalid access code")
     return {"status": "ok", "mode": "protected"}
 @app.post("/v1/analyze")
