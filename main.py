@@ -313,6 +313,7 @@ def _generate_memo(
 
 @app.post("/v1/auth/verify")
 async def verify_access(request: Request):
+    import os
     expected = os.environ.get("ACCESS_CODE", "")
     if not expected:
         return {"status": "ok", "mode": "open"}
