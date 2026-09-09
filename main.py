@@ -12,7 +12,7 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from bs4 import BeautifulSoup
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 
