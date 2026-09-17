@@ -1,8 +1,8 @@
-# Credit AI — Automated Financial Analysis Platform
+
+# Credit AI: Automated Financial Analysis Platform
 
 An end-to-end credit underwriting tool that ingests SEC 10-K filings and produces
-structured financial data, credit metrics, and a full underwriting memo — in under
-90 seconds.
+structured financial data, credit metrics, and a full underwriting memo in under 90 seconds.
 
 Built for commercial credit analysts to eliminate manual spreading and accelerate
 the underwriting process.
@@ -12,13 +12,13 @@ the underwriting process.
 ## What it does
 
 1. **Ingests** 10-K filings (HTML or PDF, up to 30MB)
-2. **Extracts** structured financials across 3 periods — income statement, balance sheet, cash flow — using GPT-4o with multi-pass section-finding heuristics
-3. **Computes** credit metrics deterministically in Python: EBITDA, leverage (Debt/EBITDA), FCC, free cash flow, Altman Z-Score, PD score (1–12 scale)
+2. **Extracts** structured financials across 3 periods (income statement, balance sheet, cash flow) using GPT-4o with multi-pass section-finding heuristics
+3. **Computes** credit metrics deterministically in Python: EBITDA, leverage (Debt/EBITDA), FCC, free cash flow, Altman Z-Score, and PD score (1-12 scale)
 4. **Analyses** the MD&A section using Claude Sonnet to extract segment-level revenue drivers, volume/price splits, and offsetting factors
 5. **Generates** a full underwriting memo in markdown
 6. **Exports** on demand:
    - Excel workbook (3 sheets: Financial Summary, YoY Bridge, Extraction Notes)
-   - Word document (narrative-first analyst working doc with YoY tables, driver bullets, segment analysis, revolver & liquidity, covenant compliance)
+   - Word document (narrative-first analyst working doc with YoY tables, driver bullets, segment analysis, revolver and liquidity, and covenant compliance)
 7. **Learns** from analyst corrections via a company-specific profile system with auto-generated extraction rules
 
 ---
