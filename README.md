@@ -158,15 +158,22 @@ pytest tests/test_metrics.py -v
 
 ---
 
-## Environment variables
+    """## Environment variables
 
-```bash
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-```
+Set these in Railway (production) or a local `.env` file (development). Never commit actual values to git.
 
-Optional:
-```bash
-PROFILES_PATH=company_profiles.json
-EXTRACTION_HINTS_PATH=extraction_hints.json
-```
+| Variable | Required | Description |
+|---|---|---|
+| `OPENAI_API_KEY` | Yes | OpenAI API key — used for financial extraction and memo generation |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key — used for MD&A analysis and segment parsing |
+| `ACCESS_CODE` | Recommended | Password gate for the frontend demo |"""
+)
+
+with open("README.md", "w") as f:
+    f.write(src)
+print("Done")
+EOF
+
+git add README.md
+git commit -m "Clean up environment variables section in README"
+git push
