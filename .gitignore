@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .DS_Store
 
+node_modules/
+company_profiles.json
+debug_mda.py
+extraction_hints.json
