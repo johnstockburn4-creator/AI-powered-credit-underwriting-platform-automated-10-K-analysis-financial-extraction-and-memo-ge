@@ -879,7 +879,7 @@ Use null only if a value genuinely cannot be determined."""
         client = get_anthropic_client()
         result_text = _call_claude_with_retry(
             client,
-            model="claude-sonnet-4-6", max_tokens=4000, temperature=0.0,
+            model="claude-sonnet-4-6", max_tokens=4000,
             system="Extract revolving credit facility data from 10-K debt notes. Return valid JSON only.",
             messages=[{"role": "user", "content": prompt}],
         )
