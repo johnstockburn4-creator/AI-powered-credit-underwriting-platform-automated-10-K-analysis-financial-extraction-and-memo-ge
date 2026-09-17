@@ -169,11 +169,4 @@ Set these in Railway (production) or a local `.env` file (development). Never co
 | `ACCESS_CODE` | Recommended | Password gate for the frontend demo |"""
 )
 
-with open("README.md", "w") as f:
-    f.write(src)
-print("Done")
-EOF
 
-git add README.md
-git commit -m "Clean up environment variables section in README"
-git push
