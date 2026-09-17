@@ -84,7 +84,7 @@ Frontend (React + Vite)
 ### Backend
 
 ```bash
-cd Optimus2-backend-for-credit-AI
+cd credit-ai-backend
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -96,7 +96,7 @@ uvicorn main:app --reload --port 8000
 ### Frontend
 
 ```bash
-cd Optimus2-frontend
+cd credit-ai-frontend
 npm install
 npm run dev          # runs on localhost:3000
 ```
@@ -150,7 +150,7 @@ The extractor improves over time through three layers:
 ## Testing
 
 ```bash
-cd Optimus2-backend-for-credit-AI
+cd credit-ai-backend
 pytest tests/test_metrics.py -v
 ```
 
