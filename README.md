@@ -173,5 +173,3 @@ Set these in Railway (production) or a local `.env` file (development). Never co
 | `ACCESS_CODE` | Recommended | Password gate for the frontend demo |"""
 )
 
-
-# force redeploy Thu Sep 17 17:07:39 CDT 2026
