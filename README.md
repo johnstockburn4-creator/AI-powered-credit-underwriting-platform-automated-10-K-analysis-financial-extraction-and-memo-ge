@@ -173,3 +173,4 @@ Set these in Railway (production) or a local `.env` file (development). Never co
 | `ACCESS_CODE` | Recommended | Password gate for the frontend demo |"""
 )
 
+# reconnected
